@@ -7,12 +7,20 @@ on:
 
 jobs:
   build:
-    # GitHub 托管 runner（ubuntu-22.04，约 7GB 内存 / 14GB 磁盘）。完整编译有可能因内存或磁盘不足失败；
-    # 若失败，请改用自托管 runner（16GB+ 内存、30GB+ 磁盘），把下面这行改回 [self-hosted, linux]。
+    # GitHub 托管 runner（ubuntu-22.04，约 7GB 内存 / 14GB 磁盘）。已启用“释放磁盘空间”+ 降并行度
+    # 以尽量适配；若仍因资源不足失败，请改用自托管 runner（16GB+ 内存、30GB+ 磁盘），把下面这行改回 [self-hosted, linux]。
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout 本仓库（含脚本）
         uses: actions/checkout@v4
+
+      - name: 释放磁盘空间（清理 GitHub 托管 runner 预装冗余软件，腾出 ~10-15GB）
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/hostedtoolcache /usr/local/lib/android \
+                     /usr/local/share/powershell /opt/ghc /usr/lib/mono* /opt/microsoft \
+                     /usr/local/julia* /usr/share/swift 2>/dev/null || true
+          sudo docker image prune -a -f 2>/dev/null || true
+          echo "=== 清理后磁盘 ==="; df -h /
 
       - name: 安装编译依赖
         run: |
@@ -78,9 +86,9 @@ jobs:
           EOF
           make defconfig
 
-      - name: 编译
+      - name: 编译（降并行度以适配托管 runner 内存）
         working-directory: immwrt
-        run: make -j"$(nproc)" V=s
+        run: make -j2 V=s
 
       - name: 上传固件产物
         uses: actions/upload-artifact@v4
