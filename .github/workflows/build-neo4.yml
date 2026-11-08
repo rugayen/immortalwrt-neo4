@@ -7,17 +7,18 @@ on:
 
 jobs:
   build:
-    # 注意：GitHub 托管的 runner 仅有 ~7GB 内存、~14GB 磁盘，完整编译可能
-    # 因内存/磁盘不足而失败。若失败，请改用自托管 runner（16GB+ 内存、30GB+ 磁盘）。
-    runs-on: ubuntu-22.04
+    # 自托管 runner：请在拥有 16GB+ 内存、30GB+ 空闲磁盘的 Linux 机器（推荐 Ubuntu 22.04 / WSL2 Ubuntu）
+    # 上安装并启动 GitHub Actions 自托管 runner，默认标签为 self-hosted + linux 即可被本工作流选中。
+    runs-on: [self-hosted, linux]
     steps:
       - name: Checkout 本仓库（含脚本）
         uses: actions/checkout@v4
 
       - name: 安装编译依赖
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          if [ "$(id -u)" -ne 0 ]; then SUDO=sudo; else SUDO=; fi
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends \
             build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
             gettext git libncurses5-dev libssl-dev python3 python3-distutils \
             python3-setuptools rsync unzip zlib1g-dev file wget ccache
