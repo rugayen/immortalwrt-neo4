@@ -1,0 +1,14 @@
+# Build artifacts (never commit these)
+*.img
+*.img.gz
+*.bin
+/build/
+/openwrt/
+/immortalwrt/
+dl/
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
