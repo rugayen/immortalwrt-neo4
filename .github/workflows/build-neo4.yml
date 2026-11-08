@@ -7,9 +7,9 @@ on:
 
 jobs:
   build:
-    # 自托管 runner：请在拥有 16GB+ 内存、30GB+ 空闲磁盘的 Linux 机器（推荐 Ubuntu 22.04 / WSL2 Ubuntu）
-    # 上安装并启动 GitHub Actions 自托管 runner，默认标签为 self-hosted + linux 即可被本工作流选中。
-    runs-on: [self-hosted, linux]
+    # GitHub 托管 runner（ubuntu-22.04，约 7GB 内存 / 14GB 磁盘）。完整编译有可能因内存或磁盘不足失败；
+    # 若失败，请改用自托管 runner（16GB+ 内存、30GB+ 磁盘），把下面这行改回 [self-hosted, linux]。
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout 本仓库（含脚本）
         uses: actions/checkout@v4
