@@ -57,9 +57,10 @@ define Device/friendlyarm_nanopi-neo4
   $(Device/rk3399)
   DEVICE_VENDOR := FriendlyARM
   DEVICE_MODEL := NanoPi NEO4
-  # NEO4 的 U-Boot defconfig 使用 CONFIG_TPL=y（binman 方式打包 idbloader），
-  # 因此用 pine64-img 流程写入合并后的 u-boot-rockchip.bin（而非 pine64-bin 的三段式）。
-  BOOT_FLOW := pine64-img
+  # RK3399 采用 Rockchip miniloader 三段式启动（pine64-bin）：idbloader/trust 来自
+  # rockchip-rkbin 预编译 blob，U-Boot 自身由 nanopi-neo4-rk3399_defconfig 编译为
+  # -uboot.img。这与官方 rk3399 设备（nanopi-r4s 等）完全一致。
+  BOOT_FLOW := pine64-bin
   DEVICE_PACKAGES := kmod-brcmfmac brcmfmac-firmware-43430-sdio brcmfmac-nvram-43430-sdio
 endef
 
@@ -75,16 +76,15 @@ EOF
     sed -i 's|^\(  rock-5c-rk3588s\)$|\1 \\\n  nanopi-neo4-rk3399|' \
       package/boot/uboot-rockchip/Makefile
     # 2) 追加 U-Boot 设备块。BUILD_VARIANT 会自动变成 nanopi-neo4-rk3399，
-    #    配合 TPL 后由 InstallDev 产出 $(UBOOT_DEVICE_NAME)-u-boot-rockchip.bin，
-    #    正好被 pine64-img 流程写入镜像。
+    #    由 InstallDev（无 TPL 分支）产出 $(UBOOT_DEVICE_NAME)-uboot.img，
+    #    正好被 pine64-bin 流程写入镜像（与官方 nanopi-r4s 一致）。
     cat >> package/boot/uboot-rockchip/Makefile <<'EOF'
 
 define U-Boot/nanopi-neo4-rk3399
   $(U-Boot/rk3399/Default)
   NAME:=NanoPi NEO4
-  # NEO4 的 U-Boot defconfig 启用 CONFIG_TPL=y，需显式提供 RK3399 的 DDR 初始化
-  # blob（rk3399_ddr_800MHz_v1.30.bin），否则 binman 打包 u-boot-rockchip.bin 会失败。
-  TPL:=$(RK3399_TPL)
+  # RK3399 的 U-Boot/rk3399/Default 仅设 ATF（不含 TPL），配合 pine64-bin 流程：
+  # DDR 初始化由 rockchip-rkbin 的预编译 idbloader 提供，无需 binman 打包。
   BUILD_DEVICES:= \
     friendlyarm_nanopi-neo4
 endef
