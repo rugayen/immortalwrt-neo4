@@ -48,6 +48,9 @@ jobs:
             $(Device/rk3399)
             DEVICE_VENDOR := FriendlyARM
             DEVICE_MODEL := NanoPi NEO4
+            # NEO4 的 U-Boot defconfig 使用 CONFIG_TPL=y（binman 打包 idbloader），
+            # 故用 pine64-img 流程写入合并后的 u-boot-rockchip.bin（而非 pine64-bin 三段式）。
+            BOOT_FLOW := pine64-img
             DEVICE_PACKAGES := kmod-brcmfmac brcmfmac-firmware-43430-sdio brcmfmac-nvram-43430-sdio
           endef
 
@@ -62,6 +65,9 @@ jobs:
           define U-Boot/nanopi-neo4-rk3399
             $(U-Boot/rk3399/Default)
             NAME:=NanoPi NEO4
+            # NEO4 的 U-Boot defconfig 启用 CONFIG_TPL=y，需显式提供 RK3399 的 DDR 初始化
+            # blob（rk3399_ddr_800MHz_v1.30.bin），否则 binman 打包 u-boot-rockchip.bin 会失败。
+            TPL:=$(RK3399_TPL)
             BUILD_DEVICES:= \
               friendlyarm_nanopi-neo4
           endef
