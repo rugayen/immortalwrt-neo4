@@ -69,7 +69,16 @@ if [ ! -b "$p3" ]; then
         log "缺少 parted，无法创建分区，跳过"
         exit 0
     fi
-    if ! parted -s "$disk" mkpart primary ext4 "${newstart}s" 100% >>"$LOG" 2>&1; then
+    # GPT 用「分区名」，MBR 用「primary」，两者 parted 语法不同
+    ptlabel=$(parted -s "$disk" print 2>/dev/null \
+        | sed -n 's/^Partition Table:[[:space:]]*//p' | head -1)
+    log "分区表类型=${ptlabel:-未知}"
+    if [ "$ptlabel" = "gpt" ]; then
+        mkparted() { parted -s "$1" mkpart emmc-data ext4 "$2" 100%; }
+    else
+        mkparted() { parted -s "$1" mkpart primary ext4 "$2" 100%; }
+    fi
+    if ! mkparted "$disk" "${newstart}s" >>"$LOG" 2>&1; then
         log "parted mkpart 失败，下次启动重试"
         exit 1
     fi

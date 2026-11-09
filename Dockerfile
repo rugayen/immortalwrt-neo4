@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
         gettext git libncurses5-dev libssl-dev python3 python3-distutils \
         python3-setuptools python3-pyelftools python3-dev swig \
-        rsync unzip zlib1g-dev file wget vim ca-certificates \
+        rsync unzip zlib1g-dev file wget vim ca-certificates gdisk \
         ccache bash sudo && \
     rm -rf /var/lib/apt/lists/*
 

@@ -240,3 +240,24 @@ Windows 可用 balenaEtcher / Rufus 直接选择该 `.img.gz`。推荐 **squashf
 - 依赖包已在 25.12.2 中核实存在：`parted`（锁定的 packages feed `utils/parted`）、
   `e2fsprogs` 与 `block-mount`（主仓库）、`kmod-fs-ext4`。
 - 最终这一版合并：**v25.12.2 + LAN DHCP + LuCI 中文 + IPv6 + 4GB 软件包空间 + eMMC 剩余空间挂载**。
+
+## 分区表改为 GPT（13:44 用户追加）
+
+- **启动链可行性已核实**：U-Boot 2025.10 的 `nanopi-neo4-rk3399_defconfig` 明确带
+  `CONFIG_CMD_GPT=y`；`disk/Kconfig` 里 `EFI_PARTITION` 默认 `y if BOOT_DEFAULTS`、
+  `PARTITION_UUIDS` 默认 `y if EFI_PARTITION`，因此 GPT 下 `part uuid ...:2 uuid`
+  生成 `root=PARTUUID=` 与内核匹配，U-Boot 也能从分区 1 读取 `kernel.img`。
+- **实现方式**：25.12.2 的 `gen_image_generic.sh` 虽可用 `GUID` 让 `ptgen -g` 直接出 GPT，
+  但那条路径会把 boot 分区改成 FAT 并引入 `mkfs.fat`/`mcopy` host 依赖。改为编译后
+  用 **`sgdisk --mbrtogpt` 原地转换**（新增 `neo4-gpt-convert.py`，CI/本地脚本共用）：
+  - 保留两个分区的起止扇区与 **ext4 boot 分区**；
+  - 保留 gzip 之后附加的 OpenWrt JSON 元数据（`append-metadata`）；
+  - 只改写 LBA0 保护 MBR、LBA1–33 GPT 表、文件末尾备份 GPT；
+  - LBA64 / 16384 / 24576 的 Rockchip idbloader / uboot.img / trust.bin **不受影响**。
+- **转换后强校验**（任一不符即让 CI 失败，避免产出无法启动的镜像）：
+  `EFI PART` 签名、保护 MBR 的 `0xEE`、GPT 分区起止 LBA 与原 MBR 一致、三段引导 blob 完好。
+- runner 依赖新增 `gdisk`（提供 sgdisk），Dockerfile 同步；本地脚本编译后自动调用转换。
+- `neo4-emmc-data.uci-defaults.sh` 同步适配：检测 `Partition Table: gpt` 后用
+  `parted mkpart emmc-data ext4 ...`（MBR 才用 `primary`），`100%` 保留 GPT 末尾备份表。
+- 上一版 run `42568491957` 已取消，GPT 与其余配置合并为一次编译。
+- run 42568491957 结束，结论 cancelled（非成功/失败）

@@ -228,6 +228,10 @@ build_native() {
   info "开始编译（jobs=$JOBS，预计 1~3 小时）..."
   make -j"$JOBS" V=s
 
+  info "分区表转换为 GPT ..."
+  python3 "$SCRIPT_DIR/neo4-gpt-convert.py" bin/targets/rockchip/armv8 \
+    || die "GPT 转换失败（需要 gdisk/sgdisk，请 apt install gdisk）"
+
   info "编译完成，产物如下："
   ls -lh bin/targets/rockchip/armv8/*nanopi-neo4* || die "未找到产物，请检查上面的编译日志"
   echo
