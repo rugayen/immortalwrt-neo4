@@ -29,6 +29,9 @@ import zlib
 
 SLACK = 1024 * 1024          # 末尾预留 1MB 给备份 GPT
 BOOT_OFFSETS = (32768, 8388608, 12582912)  # LBA64 / 0x4000 / 0x6000
+CHUNK = 256 * 1024
+MAX_OUT = 4 * 1024 * 1024    # 流式 decompress 的单次输出上限
+HEAD_KEEP = 16 * 1024 * 1024  # --verify 只保留前 16MB（足够覆盖引导 blob 与 GPT 表）
 
 
 def mbr_partitions(img):
@@ -60,15 +63,41 @@ def boot_blobs_present(img):
 
 
 def inspect(path):
-    raw = open(path, "rb").read()
+    """流式 --verify：镜像可达 4GB，只保留前 16MB 用于结构检查，避免内存耗尽。"""
     dec = zlib.decompressobj(31)
-    img = dec.decompress(raw) + dec.flush()
+    head = bytearray()
+    total = 0
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(CHUNK)
+            if not chunk:
+                break
+            pending = chunk
+            while pending and not dec.eof:
+                data = dec.decompress(pending, MAX_OUT)
+                if data:
+                    total += len(data)
+                    room = HEAD_KEEP - len(head)
+                    if room > 0:
+                        head.extend(data[:room])
+                pending = dec.unconsumed_tail
+            if dec.eof:
+                break
+        tail = dec.flush()
+        if tail:
+            total += len(tail)
+            room = HEAD_KEEP - len(head)
+            if room > 0:
+                head.extend(tail[:room])
+    img = bytes(head)
     meta = dec.unused_data
     parts = mbr_partitions(img)
-    print("  %-72s raw=%d 元数据=%d" % (os.path.basename(path), len(img), len(meta)))
-    print("    MBR 分区:", [(s, c, hex(t)) for s, c, t in parts])
-    print("    引导 blob:", "存在" if boot_blobs_present(img) else "缺失",
-          " GPT签名:", img[512:520] == b"EFI PART")
+    gpt = gpt_partitions(img)
+    print("  %-70s raw=%.1f MB 元数据=%d" % (
+        os.path.basename(path), total / 1048576, len(meta)))
+    print("    MBR/保护MBR:", [(s, c, hex(t)) for s, c, t in parts])
+    print("    GPT 分区:", gpt[:4], " GPT签名:", img[512:520] == b"EFI PART")
+    print("    引导 blob:", "存在" if boot_blobs_present(img) else "缺失")
     return img, meta, parts
 
 

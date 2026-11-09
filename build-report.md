@@ -261,3 +261,47 @@ Windows 可用 balenaEtcher / Rufus 直接选择该 `.img.gz`。推荐 **squashf
   `parted mkpart emmc-data ext4 ...`（MBR 才用 `primary`），`100%` 保留 GPT 末尾备份表。
 - 上一版 run `42568491957` 已取消，GPT 与其余配置合并为一次编译。
 - run 42568491957 结束，结论 cancelled（非成功/失败）
+
+## ✅ 构建成功 —— 2026-11-09 07:24 UTC
+
+- **成功 run**：`42569562442`
+- **artifact id**：`13656830788`
+- **固件目录**：`firmware-dhcp/`
+
+```text
+immortalwrt-rockchip-armv8-friendlyarm_nanopi-neo4-ext4-sysupgrade.img.gz                      21173839 bytes
+immortalwrt-rockchip-armv8-friendlyarm_nanopi-neo4-squashfs-sysupgrade.img.gz                  19083340 bytes
+immortalwrt-rockchip-armv8-friendlyarm_nanopi-neo4.manifest                                        5813 bytes
+```
+
+自动闭环结束：固件与 eFlasher 专用包已输出到 `firmware-dhcp/`，可直接刷入 SD 卡或 eMMC。
+
+### 交付前校验与一处后处理修复（15:24）
+
+- **CI 结论**：run `42569562442` `completed/success`，步骤 #9 编译、#10 **分区表转换为 GPT**、
+  #11 上传产物全部 success。
+- **发现并修复**：首次 watchdog 生成 eFlasher 包时，`make-eflasher-packages.py` 把 4GB 镜像
+  一次性解压进内存导致 `MemoryError`，包实际未生成（脚本误报"已生成"）。已改为
+  **流式解压 + 流式写 gzip**（内存恒定几 MB），同时给 watchdog 加上返回码判断，避免再误报。
+  该修复只影响本地后处理，不影响已编译固件，故用 `[skip ci]` 提交，不触发新构建。
+- **最终 4 个镜像文件逐项校验通过**（流式扫描，保留前 16MB 与末尾 64KB）：
+
+  | 检查项 | 结果 |
+  |---|---|
+  | 保护 MBR 类型 | `0xEE` |
+  | GPT 主签名 / 末尾备份 GPT | 均存在 |
+  | GPT 分区 1 | `(65536, 98303)` = boot 16MB @32MB |
+  | GPT 分区 2 | `(131072, 8519679)` = root **4096MB** @64MB |
+  | idbloader @32KB | 有数据 |
+  | uboot.img @8MB | `4c4f414445522020` = `"LOADER  "` |
+  | trust.bin @12MB | `424c3358` = `"BL3X"` |
+  | 解压后镜像 | 4161 MB（约 4.06GB） |
+  | sysupgrade 尾部元数据 | 580 字节 JSON 保留 |
+  | eFlasher 专用包尾部 | 0 字节（纯 gzip） |
+
+- **eFlasher 专用包 SHA256**：
+  - `immortalwrt-neo4-squashfs-eflasher.img.gz` = `172479b0f1e71fbf485de8dc12496b20b65a0dc5b04a48c97b4d58b3a997e156`
+  - `immortalwrt-neo4-ext4-eflasher.img.gz` = `1d8cde03fe0f717d028a0fdd0b49ea7301fd183e18076ca9eda14b0d3168502a`
+
+> 注意：4GB root 分区使刷写时需实际写入约 4.06GB，比早期 224MB 版本慢；
+> eFlasher 的 TF 卡放 `.img.gz` 压缩文件（约 19MB）即可，FAT32 单文件限制不受影响。
