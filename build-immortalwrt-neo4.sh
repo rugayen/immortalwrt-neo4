@@ -38,8 +38,8 @@ EXTRA_PACKAGES=(
   luci luci-ssl luci-i18n-base-zh-cn odhcp6c
   parted e2fsprogs block-mount kmod-fs-ext4
   kmod-usb3 kmod-usb-storage kmod-usb-storage-uas
-  kmod-brcmfmac brcmfmac-firmware-43430-sdio brcmfmac-nvram-43430-sdio
-  wpad-openssl
+  kmod-brcmfmac cypress-firmware-43430-sdio brcmfmac-firmware-43430-sdio brcmfmac-nvram-43430-sdio
+  wpad-openssl iw
 )
 
 info()  { echo "==> $*"; }
@@ -127,54 +127,15 @@ PY
   # OpenWrt 会把源码根目录 files/ 原样打进 rootfs；/etc/uci-defaults/*.sh 在
   # config_generate 生成 /etc/config/network、/etc/config/dhcp 之后执行，
   # exit 0 后脚本自动删除（只生效一次，用户之后可自行改回）。
-  info "注入首次启动配置：LAN=DHCP + LuCI 中文 ..."
-  mkdir -p files/etc/uci-defaults
-  cat > files/etc/uci-defaults/99-neo4-lan-dhcp <<'EOF'
-#!/bin/sh
-# NEO4 只有一个网口：默认 LAN 静态 192.168.1.1 + 自带 DHCP 服务器。
-# 改为 DHCP 客户端从上级路由器取地址，并关闭自身 LAN DHCP 服务器避免冲突。
-# 守卫：config_generate 尚未生成 network.lan 时不写配置，返回 1 让
-# uci-defaults 保留本脚本，下次启动再试，避免写出残缺的 network 配置。
-if ! uci -q get network.lan >/dev/null 2>&1; then
-    exit 1
-fi
-uci -q set network.lan.proto='dhcp'
-uci -q delete network.lan.ipaddr
-uci -q delete network.lan.netmask
-uci -q set dhcp.lan.ignore='1'
-# 主机名固定为 NEO4，便于在主路由的 DHCP 租约表里找到它。
-uci -q set system.@system[0].hostname='NEO4'
-# LuCI 默认简体中文（语言包 luci-i18n-base-zh-cn 已预装）。
-# dispatcher 读 luci.main.lang 并把 '_' 转成 '-' 加载 *.zh-cn.lmo，故写 zh_cn。
-uci -q set luci.main.lang='zh_cn'
-# ---- IPv6 自动获取（OpenWrt 官方 Bridged AP 方案） ----
-# lan6 复用 lan 做 DHCPv6 客户端；上级只发 RA 时也能靠 SLAAC + RDNSS 拿到地址与 DNS。
-uci -q set network.lan6='interface'
-uci -q set network.lan6.proto='dhcpv6'
-uci -q set network.lan6.device='@lan'
-uci -q set network.lan6.reqaddress='try'
-uci -q set network.lan6.reqprefix='no'
-uci -q set network.lan.delegate='0'
-# 本机 LAN 不提供 RA/DHCPv6/NDP 服务，交给上级路由，避免冲突。
-uci -q set dhcp.lan.dhcpv6='disabled'
-uci -q set dhcp.lan.ra='disabled'
-uci -q set dhcp.lan.ndp='disabled'
-uci commit
-exit 0
-EOF
-  chmod +x files/etc/uci-defaults/99-neo4-lan-dhcp
-  # 开启 IPv6 转发时仍接受 RA，保证 SLAAC 生效
-  mkdir -p files/etc/sysctl.d
-  cat > files/etc/sysctl.d/99-neo4-ipv6.conf <<'EOF'
-net.ipv6.conf.all.accept_ra=2
-net.ipv6.conf.default.accept_ra=2
-EOF
-  # eMMC/SD 卡剩余空间自动分区并挂载到 /mnt/emmc（与 CI 共用同一份模板）
-  info "注入 eMMC 数据分区脚本 ..."
-  mkdir -p files/etc/uci-defaults
-  cp "$SCRIPT_DIR/neo4-emmc-data.uci-defaults.sh" \
-     files/etc/uci-defaults/99-neo4-emmc-data
-  chmod +x files/etc/uci-defaults/99-neo4-emmc-data
+  # 注入「10.10.10.74 运维手册」最终态配置：仓库 files/ 下是手册
+  # snapshots/*.txt 的配置原文 + 首次启动脚本，与 CI 共用同一份。
+  # OpenWrt 会把源码根 files/ 原样打进 rootfs，刷完开机即达手册最终状态。
+  info "注入运维手册最终态配置（network/dhcp/firewall/wireless/apk/rc.local）..."
+  mkdir -p files
+  cp -a "$SCRIPT_DIR/files/." files/
+  chmod +x files/etc/uci-defaults/* files/etc/rc.local
+  chmod 600 files/etc/dropbear/authorized_keys
+
 }
 
 write_config() {

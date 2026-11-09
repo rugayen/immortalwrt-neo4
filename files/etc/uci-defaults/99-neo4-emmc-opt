@@ -1,0 +1,113 @@
+#!/bin/sh
+# 首次启动：把启动盘（eMMC / SD 卡）root 分区之后的剩余空间建成第 3 分区，
+# ext4 格式化，挂载到 /opt，并写 /etc/rc.local 持久化（手册实测 fstab 在此固件不可用）。
+#
+# 幂等 + 失败安全：只对新分区格式化；工具缺失/失败只记日志，不影响启动；
+# 返回 1 时 uci-defaults 保留脚本，下次启动重试。
+# 日志：/tmp/neo4-emmc-opt.log
+
+LOG=/tmp/neo4-emmc-opt.log
+MOUNTPOINT=/opt
+LABEL=opt_data
+log() {
+    echo "$(date) $*" >> "$LOG"
+    logger -t neo4-emmc-opt "$*" 2>/dev/null || true
+}
+
+# ---- 1) 从 cmdline 的 root=PARTUUID= 定位启动盘 ----
+partuuid=$(sed -n 's/.*root=PARTUUID=\([^ ]*\).*/\1/p' /proc/cmdline)
+if [ -z "$partuuid" ]; then log "无 root=PARTUUID，跳过"; exit 0; fi
+rootpart=""
+for p in /sys/class/block/*/*/partuuid /sys/class/block/*/partuuid; do
+    [ -r "$p" ] || continue
+    if [ "$(cat "$p")" = "$partuuid" ]; then
+        rootpart=$(basename "$(dirname "$p")"); break
+    fi
+done
+if [ -z "$rootpart" ]; then log "按 PARTUUID=$partuuid 找不到根分区，下次启动重试"; exit 1; fi
+case "$rootpart" in
+    *p[0-9]) diskname="${rootpart%p*}" ;;
+    *)       diskname=$(echo "$rootpart" | sed 's/[0-9]*$//') ;;
+esac
+disk="/dev/$diskname"
+[ -b "$disk" ] || { log "$disk 不是块设备，跳过"; exit 0; }
+log "启动盘=$disk 根分区=$rootpart PARTUUID=$partuuid"
+
+# ---- 2) 计算剩余空间 ----
+start=$(cat "/sys/class/block/$rootpart/start" 2>/dev/null)
+size=$(cat "/sys/class/block/$rootpart/size" 2>/dev/null)
+total=$(cat "/sys/class/block/$diskname/size" 2>/dev/null)
+if [ -z "$start" ] || [ -z "$size" ] || [ -z "$total" ]; then
+    log "读不到分区/磁盘扇区信息，下次启动重试"; exit 1
+fi
+newstart=$((start + size))
+remain=$((total - newstart))
+if [ "$remain" -le 2097152 ]; then
+    log "剩余空间不足 1GB（${remain} 扇区），跳过"; exit 0
+fi
+log "root start=$start size=$size total=$total 新分区起点=$newstart 剩余=${remain} 扇区"
+
+# ---- 3) 必要时创建 p3（GPT 用分区名，MBR 用 primary）----
+p3="${disk}p3"
+created=0
+if [ ! -b "$p3" ]; then
+    if ! command -v parted >/dev/null 2>&1; then
+        log "缺少 parted，下次启动重试"; exit 1
+    fi
+    ptlabel=$(parted -s "$disk" print 2>/dev/null \
+        | sed -n 's/^Partition Table:[[:space:]]*//p' | head -1)
+    log "分区表类型=${ptlabel:-未知}"
+    if [ "$ptlabel" = "gpt" ]; then
+        mkparted() { parted -s "$1" mkpart opt_data ext4 "$2" 100%; }
+    else
+        mkparted() { parted -s "$1" mkpart primary ext4 "$2" 100%; }
+    fi
+    if ! mkparted "$disk" "${newstart}s" >>"$LOG" 2>&1; then
+        log "parted mkpart 失败，下次启动重试"; exit 1
+    fi
+    created=1
+    partx -u "$disk" >>"$LOG" 2>&1 || partx -a "$disk" >>"$LOG" 2>&1 || true
+    sleep 2
+fi
+if [ ! -b "$p3" ]; then
+    log "$p3 设备节点尚未出现，下次启动重试"; exit 1
+fi
+
+# ---- 4) 仅对新分区格式化（绝不覆盖已有数据）----
+if [ "$created" = "1" ]; then
+    if ! command -v mkfs.ext4 >/dev/null 2>&1; then
+        log "缺少 mkfs.ext4，分区已建但未格式化，下次启动重试"; exit 1
+    fi
+    if ! mkfs.ext4 -F -L "$LABEL" -m 0 "$p3" >>"$LOG" 2>&1; then
+        log "mkfs.ext4 失败，下次启动重试"; exit 1
+    fi
+    log "已格式化 $p3（ext4, label=$LABEL）"
+fi
+
+# ---- 5) 写 rc.local（按实际设备名，自动适配 SD / eMMC）----
+mkdir -p "$MOUNTPOINT"
+cat > /etc/rc.local <<EOF
+#!/bin/sh
+# Mount remaining eMMC/SD space (p3, label $LABEL) at $MOUNTPOINT
+DEV=$p3
+MP=$MOUNTPOINT
+mkdir -p "\$MP"
+if ! grep -q " \$MP " /proc/mounts; then
+  AUTO=\$(grep "^\$DEV " /proc/mounts | head -1 | cut -d' ' -f2)
+  [ -n "\$AUTO" ] && umount "\$AUTO" 2>/dev/null
+  mount "\$DEV" "\$MP"
+fi
+exit 0
+EOF
+chmod +x /etc/rc.local
+log "rc.local 已写入 DEV=$p3 MP=$MOUNTPOINT"
+
+# ---- 6) 立即挂载一次（不等下次启动）----
+if ! grep -q " $MOUNTPOINT " /proc/mounts; then
+    AUTO=$(grep "^$p3 " /proc/mounts | head -1 | cut -d' ' -f2)
+    [ -n "$AUTO" ] && umount "$AUTO" 2>/dev/null
+    mount -t ext4 "$p3" "$MOUNTPOINT" >>"$LOG" 2>&1 || \
+        log "本次未挂载成功，rc.local 会在下次启动挂载"
+fi
+log "完成：$p3 -> $MOUNTPOINT"
+exit 0

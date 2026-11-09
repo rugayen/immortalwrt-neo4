@@ -99,66 +99,23 @@ jobs:
             package/boot/uboot-rockchip/Makefile > /tmp/uboot_mk.tmp \
             && mv /tmp/uboot_mk.tmp package/boot/uboot-rockchip/Makefile
 
-      - name: 注入首次启动配置（LAN=DHCP + LuCI 中文）
+      - name: 注入运维手册最终态配置（10.10.10.74）
         working-directory: immwrt
         run: |
-          # OpenWrt 会把源码根目录 files/ 下的内容原样打进 rootfs。
-          # /etc/uci-defaults/*.sh 在首次启动时、config_generate 生成
-          # /etc/config/network 与 /etc/config/dhcp 之后执行；exit 0 后脚本自动删除，
-          # 因此只生效一次，用户之后仍可自行改回静态地址。
-          mkdir -p files/etc/uci-defaults
-          cat > files/etc/uci-defaults/99-neo4-lan-dhcp <<'EOF'
-          #!/bin/sh
-          # NEO4 只有一个网口：默认 LAN 静态 192.168.1.1 + 自带 DHCP 服务器。
-          # 改为 DHCP 客户端从上级路由器取地址，并关闭自身 LAN DHCP 服务器避免冲突。
-          # 守卫：config_generate 尚未生成 network.lan 时不写配置，返回 1 让
-          # uci-defaults 保留本脚本，下次启动再试，避免写出残缺的 network 配置。
-          if ! uci -q get network.lan >/dev/null 2>&1; then
-              exit 1
-          fi
-          uci -q set network.lan.proto='dhcp'
-          uci -q delete network.lan.ipaddr
-          uci -q delete network.lan.netmask
-          uci -q set dhcp.lan.ignore='1'
-          # 主机名固定为 NEO4，便于在主路由的 DHCP 租约表里找到它。
-          uci -q set system.@system[0].hostname='NEO4'
-          # LuCI 默认简体中文：语言包 luci-i18n-base-zh-cn 已随固件预装。
-          # LuCI dispatcher 读 luci.main.lang，并把 '_' 转成 '-' 加载 *.zh-cn.lmo，
-          # 因此这里必须写 zh_cn（而非 zh-cn / zh_Hans）。
-          uci -q set luci.main.lang='zh_cn'
-          # ---- IPv6 自动获取（OpenWrt 官方 Bridged AP 方案） ----
-          # lan6 为复用 lan 的 DHCPv6 客户端；即使上级路由只发 RA 不发 DHCPv6，
-          # 也能通过 SLAAC 获得 IPv6 地址、通过 RDNSS 获得 IPv6 DNS。
-          uci -q set network.lan6='interface'
-          uci -q set network.lan6.proto='dhcpv6'
-          uci -q set network.lan6.device='@lan'
-          uci -q set network.lan6.reqaddress='try'
-          uci -q set network.lan6.reqprefix='no'
-          uci -q set network.lan.delegate='0'
-          # 本机不在 LAN 上提供 RA / DHCPv6 / NDP 服务，全部交给上级路由，避免冲突。
-          uci -q set dhcp.lan.dhcpv6='disabled'
-          uci -q set dhcp.lan.ra='disabled'
-          uci -q set dhcp.lan.ndp='disabled'
-          uci commit
-          exit 0
-          EOF
-          chmod +x files/etc/uci-defaults/99-neo4-lan-dhcp
-          # 保证开启 IPv6 转发时内核仍接受 RA（SLAAC 生效条件）
-          mkdir -p files/etc/sysctl.d
-          cat > files/etc/sysctl.d/99-neo4-ipv6.conf <<'EOF'
-          net.ipv6.conf.all.accept_ra=2
-          net.ipv6.conf.default.accept_ra=2
-          EOF
-          echo "=== 注入的 uci-defaults ==="
-          cat files/etc/uci-defaults/99-neo4-lan-dhcp
-          echo "=== 注入的 sysctl ==="
-          cat files/etc/sysctl.d/99-neo4-ipv6.conf
-          # 把 eMMC/SD 卡剩余空间自动分区并挂载到 /mnt/emmc（模板与本地脚本共用一份）
-          cp "$GITHUB_WORKSPACE/neo4-emmc-data.uci-defaults.sh" \
-             files/etc/uci-defaults/99-neo4-emmc-data
-          chmod +x files/etc/uci-defaults/99-neo4-emmc-data
-          echo "=== 注入的 eMMC 数据分区脚本 ==="
-          wc -l files/etc/uci-defaults/99-neo4-emmc-data
+          # 仓库 files/ 下是「10.10.10.74 运维手册」的最终态配置原文
+          # （snapshots/*.txt 逐字节复制）+ 首次启动脚本。OpenWrt 会把源码根
+          # files/ 原样打进 rootfs，因此刷完开机即是手册记录的最终状态，
+          # 不用再按 docs/03 第 4 节的「重刷后重建清单」手工重做。
+          # 包含：network / dhcp / firewall / wireless、apk feeds(video 已移除)、
+          #       rc.local(/opt)、SSH authorized_keys、IPv6 sysctl、3 个 uci-defaults。
+          mkdir -p files
+          cp -a "$GITHUB_WORKSPACE/files/." files/
+          chmod +x files/etc/uci-defaults/* files/etc/rc.local
+          chmod 600 files/etc/dropbear/authorized_keys
+          echo "=== 注入的 rootfs 文件 ==="
+          find files -type f -printf '%p  %s bytes\n' | sort
+          echo "=== uci-defaults 权限 ==="
+          ls -l files/etc/uci-defaults/
 
       - name: 配置（target=rockchip/armv8, device=nanopi-neo4 + LuCI）
         working-directory: immwrt
@@ -186,9 +143,15 @@ jobs:
           CONFIG_PACKAGE_kmod-usb-storage=y
           CONFIG_PACKAGE_kmod-usb-storage-uas=y
           CONFIG_PACKAGE_kmod-brcmfmac=y
+          # 手册踩坑 #15：AP6212/BCM43430 SDIO 必须用 cypress-firmware-43430-sdio
+          # （PROVIDES:=brcmfmac-firmware-43430-sdio），它同时创建 .bin 软链。
+          # brcmfmac-firmware-43430-sdio 只是虚拟 provides 名，不是真实包，
+          # 因此显式选中真实包，避免出厂无 phy0 / 无 wlan0。
+          CONFIG_PACKAGE_cypress-firmware-43430-sdio=y
           CONFIG_PACKAGE_brcmfmac-firmware-43430-sdio=y
           CONFIG_PACKAGE_brcmfmac-nvram-43430-sdio=y
           CONFIG_PACKAGE_wpad-openssl=y
+          CONFIG_PACKAGE_iw=y
           # 双保险：显式选中 NEO4 的 U-Boot 与 ATF 包，确保即使 defconfig 的
           # DEFAULT 推导有意外，这两个启动加载器相关包也一定会被构建并安装
           # 其产物（rk3399-idbloader.bin / rk3399-trust.bin / -uboot.img）。

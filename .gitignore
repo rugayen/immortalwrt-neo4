@@ -21,6 +21,7 @@ Thumbs.db
 /watchdog.log
 /logs/
 /firmware/
+/firmware-dhcp/
 /_*.json
 /_up_*
 /.workbuddy/

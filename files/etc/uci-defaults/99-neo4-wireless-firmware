@@ -1,0 +1,26 @@
+#!/bin/sh
+# 首次启动：补齐 AP6212 / BCM43430 SDIO 无线固件的 NVRAM 软链。
+#
+# 手册踩坑 #15：只装驱动与固件包还不会有 phy0，缺的是板级/通用 NVRAM 链接。
+# 固件 .bin（brcmfmac43430-sdio.bin -> ../cypress/cyfmac43430-sdio.bin）
+# 由 cypress-firmware-43430-sdio 包提供；NVRAM 源文件
+# brcmfmac43430-sdio.AP6212.txt 由 brcmfmac-nvram-43430-sdio 包提供。
+# 这里只补两条软链，不重载驱动（避免打断首次启动）。
+
+FW=/lib/firmware/brcm
+NVRAM=brcmfmac43430-sdio.AP6212.txt
+BOARD=brcmfmac43430-sdio.friendlyarm,nanopi-neo4.txt
+GENERIC=brcmfmac43430-sdio.txt
+
+if [ ! -f "$FW/$NVRAM" ]; then
+    logger -t neo4-wifi-fw "NVRAM 源文件缺失，下次启动重试"
+    exit 1
+fi
+
+ln -sf "$NVRAM" "$FW/$BOARD" 2>/dev/null || {
+    logger -t neo4-wifi-fw "创建板级软链失败，下次启动重试"; exit 1; }
+ln -sf "$NVRAM" "$FW/$GENERIC" 2>/dev/null || {
+    logger -t neo4-wifi-fw "创建通用软链失败，下次启动重试"; exit 1; }
+
+logger -t neo4-wifi-fw "NVRAM 软链就绪：$BOARD / $GENERIC"
+exit 0

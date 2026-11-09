@@ -1,0 +1,7 @@
+# 2026-11-10: video feed disabled - 25.12.2 has no aarch64_generic/video/packages.adb (404 on every mirror)
+https://mirrors.vsean.net/openwrt/releases/25.12.2/targets/rockchip/armv8/packages/packages.adb
+https://mirrors.vsean.net/openwrt/releases/25.12.2/packages/aarch64_generic/base/packages.adb
+https://mirrors.vsean.net/openwrt/releases/25.12.2/packages/aarch64_generic/luci/packages.adb
+https://mirrors.vsean.net/openwrt/releases/25.12.2/packages/aarch64_generic/packages/packages.adb
+https://mirrors.vsean.net/openwrt/releases/25.12.2/packages/aarch64_generic/routing/packages.adb
+https://mirrors.vsean.net/openwrt/releases/25.12.2/packages/aarch64_generic/telephony/packages.adb

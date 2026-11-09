@@ -305,3 +305,62 @@ immortalwrt-rockchip-armv8-friendlyarm_nanopi-neo4.manifest                     
 
 > 注意：4GB root 分区使刷写时需实际写入约 4.06GB，比早期 224MB 版本慢；
 > eFlasher 的 TF 卡放 `.img.gz` 压缩文件（约 19MB）即可，FAT32 单文件限制不受影响。
+
+## 用户反馈：原生 sysupgrade 包不要用于整盘刷写（16:51）
+
+- 反馈：用原生 `*-squashfs-sysupgrade.img.gz` 刷机出现「**爆闪**」（LED 异常闪烁 / 启动失败）。
+- 原因：`sysupgrade.img.gz` = gzip 流 + **580 字节 JSON 元数据尾部**，是 OpenWrt 给
+  `sysupgrade` 命令用的升级载荷，**不是 eFlasher 的整盘镜像**。eFlasher 解压时遇到尾部
+  数据可能报错或写入不完整，导致引导区损坏 → 板子起不来、LED 爆闪。
+  这正是当初单独生成 `*-eflasher.img.gz`（纯 gzip、尾部 0 字节）的原因。
+- **交付口径修正**：整盘刷写（SD 卡 / eMMC / eFlasher）**只使用 `*-eflasher.img.gz` 专用包**；
+  原生 sysupgrade 包仅保留供已运行系统里执行 `sysupgrade` 升级，不再作为刷机交付物。
+- 桌面上的原生 sysupgrade 副本已按用户要求移入回收站（SHA256 与项目源文件一致，
+  项目源文件 `firmware-dhcp/` 内仍完好，可随时恢复）。
+- 若已用原生包刷坏：断电 → 按住 **Mask** 键上电进入 Maskrom → RKDevTool 执行
+  `EraseAll` 擦除 eMMC → 再用 eFlasher 专用包重刷。
+
+## 任务：固化 10.10.10.74 运维手册最终态并重新编译（2026-11-10 01:58）
+
+### 分析结论
+
+引用的 `10.10.10.74-ops-handbook-20261110.zip` 是**同一台 NEO4 / ImmortalWrt 25.12.2 单臂旁路由**
+刷完本仓库固件后的完整落地记录（21 个文件，含 `machine-profile.yaml`、`snapshots/*.txt`、
+`docs/01~04`、6 个幂等脚本）。其 `docs/03` 第 4 节明确列出「重刷固件后必须重做的 7 件事」，
+`README` 第 6 节也把「重刷镜像会覆盖 GPT 与 overlay 中装的包」列为遗留风险。
+=> 用户要的是：**把这些运行时改动固化进固件**，重刷后开机即达手册记录的最终状态。
+
+事实来源按手册约定：`machine-profile.yaml` > `snapshots/*.txt` > `docs/04` > `docs/02`。
+
+### 固化清单（逐项对应 docs/03 重建清单）
+
+| 手册项 | 固化方式 |
+|---|---|
+| network（br-lan/eth0、lan=dhcp+ip6assign 60+delegate 0、lan6 dhcpv6 含 norelease/sendclientid/multipath） | `files/etc/config/network`（快照原文） |
+| dhcp（dnsmasq 全参数、dhcp.lan ignore=1 / dhcpv6/ra/ndp disabled、odhcpd maindhcp=0） | `files/etc/config/dhcp` |
+| firewall（仅 lan zone、defaults input=REJECT/forward=REJECT、flow offload、fullcone=0、无 NAT） | `files/etc/config/firewall` |
+| wireless（AP6212 radio0、SSID ImmortalWrt、psk2+ccmp、channel 1 / 2g / HT20 / CN、disabled=0） | `files/etc/config/wireless` |
+| apk 源修复（移除 25.12.2 未发布的 video feed，vsean 镜像；官方源备份同步） | `files/etc/apk/repositories.d/distfeeds.list{,.bak}` |
+| `/opt` 24.8G 挂载 | `files/etc/rc.local` + `99-neo4-emmc-opt`（p3、label opt_data、mkfs.ext4 -m 0；脚本按实际设备名动态重写 rc.local，兼容 SD/eMMC） |
+| 无线固件 | `.config` 显式选 `cypress-firmware-43430-sdio`（PROVIDES 虚拟名不可靠）+ `99-neo4-wireless-firmware` 补两条 NVRAM 软链 |
+| 主机名 NEO4 / LuCI 中文 | `99-neo4-firstboot`（uci-defaults，带守卫） |
+| SSH 免密 | `files/etc/dropbear/authorized_keys`（本机 `~/.ssh/id_ed25519.pub`） |
+| IPv6 SLAAC | `files/etc/sysctl.d/99-neo4-ipv6.conf`（accept_ra=2） |
+
+**实现方式**：OpenWrt 把源码根 `files/` 原样打进 rootfs，故 workflow 与本地脚本统一改为
+`cp -a files/.` + `chmod`，删掉了原先冗长的内联 heredoc；CI 与本地共用同一份配置，零转录误差
+（配置原文直接由 zip 的 snapshots 提取）。
+
+### ⚠️ 敏感信息提示（已随配置进入公开仓库）
+
+- AP 密码 `00000000`（用户指定测试密码，极弱）写在 `files/etc/config/wireless`；
+- SSH **公钥**（非私钥）写在 `files/etc/dropbear/authorized_keys`；
+- 手册记录设备 root 为空密码登录、有公网 IPv6 地址且未加主动入站阻断 —— 这些是用户明确
+  选择「保持不变」的现状，本次未擅自加固。
+- 若设备暴露公网，建议换强 AP 密码并限制管理面入站。
+
+### 交付口径
+
+沿用之前全部要求：v25.12.2 + GPT + 4GB 软件包空间 + LuCI 中文 + IPv6 + 只交付
+`*-eflasher.img.gz` 专用包（原生 sysupgrade 包不作为交付物）。编译成功后由 watchdog
+自动下载、生成 eFlasher 包，并复制到 `C:/Users/rugayen/Desktop`。

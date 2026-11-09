@@ -1,0 +1,15 @@
+#!/bin/sh
+# Put your custom commands here that should be executed once
+# the system init finished. By default this file does nothing.
+
+# --- mount remaining eMMC (p3, label opt_data) at /opt ---
+DEV=/dev/mmcblk2p3
+MP=/opt
+mkdir -p "$MP"
+if ! grep -q " $MP " /proc/mounts; then
+  AUTO=$(grep "^$DEV " /proc/mounts | head -1 | cut -d' ' -f2)
+  [ -n "$AUTO" ] && umount "$AUTO" 2>/dev/null
+  mount "$DEV" "$MP"
+fi
+
+exit 0
