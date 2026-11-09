@@ -40,14 +40,8 @@ jobs:
         working-directory: immwrt
         run: |
           ./scripts/feeds update -a
-          # 注意：不要安装 video 源。master 当前快照里 video 源的
-          # feeds/video/frameworks/qt5/qt5base/Config.in 存在循环依赖，
-          # 一旦被装进配置树，make defconfig 会在解析全部包配置时报
-          # "recursive dependency detected" 并中断，导致 U-Boot / ATF 等
-          # 依赖 DEFAULT 选中的包（u-boot-nanopi-neo4-rk3399、
-          # trusted-firmware-a-rk3399）无法被选中，最终镜像打包阶段
-          # 找不到 rk3399-idbloader.bin / rk3399-trust.bin。
-          # 路由器固件只需要 base(内置) + packages + luci(+routing/telephony)。
+          # 不要安装 video 源：master 快照里 video/qt5 存在循环依赖，
+          # 一旦装入配置树，make defconfig 会中断，导致 U-Boot/ATF 等包无法选中。
           ./scripts/feeds install packages luci routing telephony
 
           cat >> target/linux/rockchip/image/armv8.mk <<'EOF'
@@ -56,31 +50,37 @@ jobs:
             $(Device/rk3399)
             DEVICE_VENDOR := FriendlyARM
             DEVICE_MODEL := NanoPi NEO4
-            # RK3399 采用 Rockchip miniloader 三段式启动（pine64-bin）：idbloader/trust
-            # 由 arm-trusted-firmware-rockchip 包（PKG_NAME=rkbin，含预编译
-            # DDR/miniloader blob）生成；U-Boot 由 nanopi-neo4-rk3399_defconfig
-            # 编译为 -uboot.img。与官方 rk3399 设备（nanopi-r4s）完全一致。
             BOOT_FLOW := pine64-bin
+            # 与 U-Boot 变体名一致，pine64-bin 据此 dd nanopi-neo4-rk3399-uboot.img 进镜像。
+            UBOOT_DEVICE_NAME := nanopi-neo4-rk3399
             DEVICE_PACKAGES := kmod-brcmfmac brcmfmac-firmware-43430-sdio brcmfmac-nvram-43430-sdio
           endef
 
           TARGET_DEVICES += friendlyarm_nanopi-neo4
           EOF
 
+          # (a) 把 nanopi-neo4-rk3399 加入 UBOOT_TARGETS（在末尾 eval 之前，列表内）
           sed -i 's|^\(  rock-5c-rk3588s\)$|\1 \\\n  nanopi-neo4-rk3399|' \
             package/boot/uboot-rockchip/Makefile
 
-          cat >> package/boot/uboot-rockchip/Makefile <<'EOF'
+          # (b) 把 U-Boot 变体定义插入到文件末尾的 $(eval $(call BuildPackage/U-Boot)) 之前。
+          #     关键：旧版用 cat >> 把定义追加到文件末尾，而该 eval 在解析时就执行，
+          #     导致 DUMP 阶段 $(call U-Boot/nanopi-neo4-rk3399) 取到空定义，包被建为空壳、
+          #     InstallDev 不出 nanopi-neo4-rk3399-uboot.img，最终 pine64-bin 流程 dd 时
+          #     "No such file or directory"（run#9 失败根因）。
+          cat > /tmp/neo4_uboot_block.txt <<'UBEOF'
 
           define U-Boot/nanopi-neo4-rk3399
             $(U-Boot/rk3399/Default)
             NAME:=NanoPi NEO4
-            # RK3399 的 U-Boot/rk3399/Default 仅设 ATF（不含 TPL），配合 pine64-bin：
-            # DDR 初始化由 rockchip-rkbin 预编译 idbloader 提供，无需 binman 打包。
             BUILD_DEVICES:= \
               friendlyarm_nanopi-neo4
           endef
-          EOF
+
+          UBEOF
+          awk '/eval.*BuildPackage\/U-Boot/{while((getline l < "/tmp/neo4_uboot_block.txt")>0) print l} {print}' \
+            package/boot/uboot-rockchip/Makefile > /tmp/uboot_mk.tmp \
+            && mv /tmp/uboot_mk.tmp package/boot/uboot-rockchip/Makefile
 
       - name: 配置（target=rockchip/armv8, device=nanopi-neo4 + LuCI）
         working-directory: immwrt

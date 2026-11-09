@@ -62,6 +62,9 @@ define Device/friendlyarm_nanopi-neo4
   # 生成，U-Boot 自身由 nanopi-neo4-rk3399_defconfig 编译为 -uboot.img。
   # 这与官方 rk3399 设备（nanopi-r4s 等）完全一致。
   BOOT_FLOW := pine64-bin
+  # 显式声明与 U-Boot 变体名一致的 UBOOT_DEVICE_NAME，pine64-bin 流程据此 dd
+  # $(SOC)-idbloader.bin / $(UBOOT_DEVICE_NAME)-uboot.img / $(SOC)-trust.bin 进镜像。
+  UBOOT_DEVICE_NAME := nanopi-neo4-rk3399
   DEVICE_PACKAGES := kmod-brcmfmac brcmfmac-firmware-43430-sdio brcmfmac-nvram-43430-sdio
 endef
 
@@ -73,23 +76,48 @@ EOF
   if grep -q "nanopi-neo4-rk3399" package/boot/uboot-rockchip/Makefile; then
     info "  uboot-rockchip 已包含 NEO4，跳过"
   else
-    # 1) 把 nanopi-neo4-rk3399 加进 UBOOT_TARGETS 列表（加到列表末尾）
-    sed -i 's|^\(  rock-5c-rk3588s\)$|\1 \\\n  nanopi-neo4-rk3399|' \
-      package/boot/uboot-rockchip/Makefile
-    # 2) 追加 U-Boot 设备块。BUILD_VARIANT 会自动变成 nanopi-neo4-rk3399，
-    #    由 InstallDev（无 TPL 分支）产出 $(UBOOT_DEVICE_NAME)-uboot.img，
-    #    正好被 pine64-bin 流程写入镜像（与官方 nanopi-r4s 一致）。
-    cat >> package/boot/uboot-rockchip/Makefile <<'EOF'
+    # 必须同时完成两件事，且二者都必须在文件末尾的 $(eval $(call BuildPackage/U-Boot))
+    # 之前生效：
+    #   (a) 把 nanopi-neo4-rk3399 加进 UBOOT_TARGETS —— DUMP 阶段才会为该变体生成包；
+    #   (b) 定义 U-Boot/nanopi-neo4-rk3399 变体块 —— 提供 BUILD_DEVICES / ATF / DEFAULT。
+    # 关键教训（run#9 失败原因）：绝不能像早期那样用 cat >> 把变体定义追加到文件末尾。
+    # 因为末尾那行 $(eval $(call BuildPackage/U-Boot)) 在 Makefile 解析时就执行，若变体
+    # 定义在其之后才出现，DUMP 阶段 $(call U-Boot/nanopi-neo4-rk3399) 会取到空定义，包被
+    # 建为空壳、InstallDev 不出 $(BUILD_VARIANT)-uboot.img，最终 pine64-bin 流程 dd 打开
+    # nanopi-neo4-rk3399-uboot.img 时报 "No such file or directory"。
+    # 变体定义经 InstallDev 的无 TPL 分支（loaderimage --pack u-boot-dtb.bin）产出
+    # nanopi-neo4-rk3399-uboot.img，正好被 pine64-bin 写入镜像（与官方 nanopi-r4s 一致）。
+    cat > /tmp/neo4_uboot_block.txt <<'UBEOF'
 
 define U-Boot/nanopi-neo4-rk3399
   $(U-Boot/rk3399/Default)
   NAME:=NanoPi NEO4
-  # RK3399 的 U-Boot/rk3399/Default 仅设 ATF（不含 TPL），配合 pine64-bin 流程：
-  # DDR 初始化由 arm-trusted-firmware-rockchip 的预编译 idbloader 提供，无需 binman 打包。
+  # RK3399 的 U-Boot/rk3399/Default 仅设 ATF（不含 TPL）：DDR 初始化由 rkbin 的预编译
+  # idbloader 提供，ATF(BL31) 由 trusted-firmware-a-rk3399 提供；U-Boot 自身编译为
+  # u-boot-dtb.bin，再经 loaderimage 打包成 $(BUILD_VARIANT)-uboot.img。
   BUILD_DEVICES:= \
     friendlyarm_nanopi-neo4
 endef
-EOF
+
+UBEOF
+    python3 - <<'PY'
+import re
+p = "package/boot/uboot-rockchip/Makefile"
+s = open(p).read()
+if "nanopi-neo4-rk3399" not in s:
+    block = open("/tmp/neo4_uboot_block.txt").read()
+    # (a) UBOOT_TARGETS：把当前最后一个条目 rock-5c-rk3588s 改为带续行符，并追加新条目
+    s = re.sub(r'^(\s*)rock-5c-rk3588s(\s*)$',
+               r'\1rock-5c-rk3588s \\\n\1nanopi-neo4-rk3399',
+               s, count=1, flags=re.M)
+    # (b) 在末尾的 $(eval $(call BuildPackage/U-Boot)) 之前插入变体定义
+    marker = "$(eval $(call BuildPackage/U-Boot))"
+    s = s.replace(marker, block + marker, 1)
+    open(p, "w").write(s)
+    print("patched uboot-rockchip/Makefile: added nanopi-neo4-rk3399 variant + UBOOT_TARGETS entry")
+else:
+    print("uboot-rockchip already patched")
+PY
   fi
 }
 
