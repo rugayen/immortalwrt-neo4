@@ -45,9 +45,12 @@ jobs:
           /usr/bin/python3 -c 'import elftools; print("system python3 OK:", elftools.__version__)'
           python3 -c 'import elftools; print("PATH python3 OK:", elftools.__version__)'
 
-      - name: 克隆 ImmortalWrt 源码
+      - name: 克隆 ImmortalWrt 源码（固定 v25.12.2 稳定版）
         run: |
-          git clone --depth 1 --branch master \
+          # 用发布 tag 而非 master 快照：可复现，feeds.conf.default 里的 feed 也锁定到
+          # 该版本对应的固定 commit。已核对 v25.12.2 的 rockchip/armv8、uboot-rockchip
+          # (U-Boot 2025.10)、rkbin、pine64-bin 布局与现有 NEO4 移植补丁完全兼容。
+          git clone --depth 1 --branch v25.12.2 \
             https://github.com/immortalwrt/immortalwrt.git immwrt
 
       - name: 移植 NEO4 设备定义 + U-Boot
@@ -96,7 +99,7 @@ jobs:
             package/boot/uboot-rockchip/Makefile > /tmp/uboot_mk.tmp \
             && mv /tmp/uboot_mk.tmp package/boot/uboot-rockchip/Makefile
 
-      - name: 注入首次启动配置（LAN = DHCP 客户端）
+      - name: 注入首次启动配置（LAN=DHCP + LuCI 中文）
         working-directory: immwrt
         run: |
           # OpenWrt 会把源码根目录 files/ 下的内容原样打进 rootfs。
@@ -119,12 +122,43 @@ jobs:
           uci -q set dhcp.lan.ignore='1'
           # 主机名固定为 NEO4，便于在主路由的 DHCP 租约表里找到它。
           uci -q set system.@system[0].hostname='NEO4'
+          # LuCI 默认简体中文：语言包 luci-i18n-base-zh-cn 已随固件预装。
+          # LuCI dispatcher 读 luci.main.lang，并把 '_' 转成 '-' 加载 *.zh-cn.lmo，
+          # 因此这里必须写 zh_cn（而非 zh-cn / zh_Hans）。
+          uci -q set luci.main.lang='zh_cn'
+          # ---- IPv6 自动获取（OpenWrt 官方 Bridged AP 方案） ----
+          # lan6 为复用 lan 的 DHCPv6 客户端；即使上级路由只发 RA 不发 DHCPv6，
+          # 也能通过 SLAAC 获得 IPv6 地址、通过 RDNSS 获得 IPv6 DNS。
+          uci -q set network.lan6='interface'
+          uci -q set network.lan6.proto='dhcpv6'
+          uci -q set network.lan6.device='@lan'
+          uci -q set network.lan6.reqaddress='try'
+          uci -q set network.lan6.reqprefix='no'
+          uci -q set network.lan.delegate='0'
+          # 本机不在 LAN 上提供 RA / DHCPv6 / NDP 服务，全部交给上级路由，避免冲突。
+          uci -q set dhcp.lan.dhcpv6='disabled'
+          uci -q set dhcp.lan.ra='disabled'
+          uci -q set dhcp.lan.ndp='disabled'
           uci commit
           exit 0
           EOF
           chmod +x files/etc/uci-defaults/99-neo4-lan-dhcp
+          # 保证开启 IPv6 转发时内核仍接受 RA（SLAAC 生效条件）
+          mkdir -p files/etc/sysctl.d
+          cat > files/etc/sysctl.d/99-neo4-ipv6.conf <<'EOF'
+          net.ipv6.conf.all.accept_ra=2
+          net.ipv6.conf.default.accept_ra=2
+          EOF
           echo "=== 注入的 uci-defaults ==="
           cat files/etc/uci-defaults/99-neo4-lan-dhcp
+          echo "=== 注入的 sysctl ==="
+          cat files/etc/sysctl.d/99-neo4-ipv6.conf
+          # 把 eMMC/SD 卡剩余空间自动分区并挂载到 /mnt/emmc（模板与本地脚本共用一份）
+          cp "$GITHUB_WORKSPACE/neo4-emmc-data.uci-defaults.sh" \
+             files/etc/uci-defaults/99-neo4-emmc-data
+          chmod +x files/etc/uci-defaults/99-neo4-emmc-data
+          echo "=== 注入的 eMMC 数据分区脚本 ==="
+          wc -l files/etc/uci-defaults/99-neo4-emmc-data
 
       - name: 配置（target=rockchip/armv8, device=nanopi-neo4 + LuCI）
         working-directory: immwrt
@@ -135,6 +169,19 @@ jobs:
           CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-neo4=y
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-ssl=y
+          # LuCI 简体中文语言包（ImmortalWrt luci feed 里 po 目录为 zh_Hans，
+          # 但 LUCI_LC_ALIAS.zh_Hans=zh-cn，包名仍是 luci-i18n-base-zh-cn）。
+          CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+          # DHCPv6 客户端（lan6 接口依赖），显式选中避免被裁剪
+          CONFIG_PACKAGE_odhcp6c=y
+          # root 分区 4GB：squashfs 之外的空间由 fstools 作为 overlay，
+          # 即「软件包可用磁盘空间」约 4GB（默认仅约 160MB）。
+          CONFIG_TARGET_ROOTFS_PARTSIZE=4096
+          # eMMC 剩余空间自动分区 / 格式化 / 挂载所需工具
+          CONFIG_PACKAGE_parted=y
+          CONFIG_PACKAGE_e2fsprogs=y
+          CONFIG_PACKAGE_block-mount=y
+          CONFIG_PACKAGE_kmod-fs-ext4=y
           CONFIG_PACKAGE_kmod-usb3=y
           CONFIG_PACKAGE_kmod-usb-storage=y
           CONFIG_PACKAGE_kmod-usb-storage-uas=y

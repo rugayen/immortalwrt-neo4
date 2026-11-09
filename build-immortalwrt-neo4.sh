@@ -27,13 +27,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ---- 可覆盖的环境变量 ----
 IMMORTALWRT_REPO="${IMMORTALWRT_REPO:-https://github.com/immortalwrt/immortalwrt.git}"
-IMMORTALWRT_BRANCH="${IMMORTALWRT_BRANCH:-master}"
+# 默认使用 ImmortalWrt v25.12.2 发布 tag（固定版本、feeds 也锁定到对应 commit）。
+# 可用 IMMORTALWRT_BRANCH=master 等覆盖；已核对 v25.12.2 与 NEO4 移植补丁兼容。
+IMMORTALWRT_BRANCH="${IMMORTALWRT_BRANCH:-v25.12.2}"
 WORKDIR="${WORKDIR:-$SCRIPT_DIR/immortalwrt}"
 JOBS="${JOBS:-$(nproc)}"
 
 # 要加入固件的额外软件包（在“设备基础包”之上）
 EXTRA_PACKAGES=(
-  luci luci-ssl
+  luci luci-ssl luci-i18n-base-zh-cn odhcp6c
+  parted e2fsprogs block-mount kmod-fs-ext4
   kmod-usb3 kmod-usb-storage kmod-usb-storage-uas
   kmod-brcmfmac brcmfmac-firmware-43430-sdio brcmfmac-nvram-43430-sdio
   wpad-openssl
@@ -120,11 +123,11 @@ else:
 PY
   fi
 
-  # 首次启动配置：LAN 改为 DHCP 客户端，并关闭自身 LAN DHCP 服务器。
+  # 首次启动配置：LAN 改为 DHCP 客户端、关闭自身 DHCP 服务器、LuCI 默认中文。
   # OpenWrt 会把源码根目录 files/ 原样打进 rootfs；/etc/uci-defaults/*.sh 在
   # config_generate 生成 /etc/config/network、/etc/config/dhcp 之后执行，
   # exit 0 后脚本自动删除（只生效一次，用户之后可自行改回）。
-  info "注入首次启动配置：LAN = DHCP 客户端 ..."
+  info "注入首次启动配置：LAN=DHCP + LuCI 中文 ..."
   mkdir -p files/etc/uci-defaults
   cat > files/etc/uci-defaults/99-neo4-lan-dhcp <<'EOF'
 #!/bin/sh
@@ -141,10 +144,37 @@ uci -q delete network.lan.netmask
 uci -q set dhcp.lan.ignore='1'
 # 主机名固定为 NEO4，便于在主路由的 DHCP 租约表里找到它。
 uci -q set system.@system[0].hostname='NEO4'
+# LuCI 默认简体中文（语言包 luci-i18n-base-zh-cn 已预装）。
+# dispatcher 读 luci.main.lang 并把 '_' 转成 '-' 加载 *.zh-cn.lmo，故写 zh_cn。
+uci -q set luci.main.lang='zh_cn'
+# ---- IPv6 自动获取（OpenWrt 官方 Bridged AP 方案） ----
+# lan6 复用 lan 做 DHCPv6 客户端；上级只发 RA 时也能靠 SLAAC + RDNSS 拿到地址与 DNS。
+uci -q set network.lan6='interface'
+uci -q set network.lan6.proto='dhcpv6'
+uci -q set network.lan6.device='@lan'
+uci -q set network.lan6.reqaddress='try'
+uci -q set network.lan6.reqprefix='no'
+uci -q set network.lan.delegate='0'
+# 本机 LAN 不提供 RA/DHCPv6/NDP 服务，交给上级路由，避免冲突。
+uci -q set dhcp.lan.dhcpv6='disabled'
+uci -q set dhcp.lan.ra='disabled'
+uci -q set dhcp.lan.ndp='disabled'
 uci commit
 exit 0
 EOF
   chmod +x files/etc/uci-defaults/99-neo4-lan-dhcp
+  # 开启 IPv6 转发时仍接受 RA，保证 SLAAC 生效
+  mkdir -p files/etc/sysctl.d
+  cat > files/etc/sysctl.d/99-neo4-ipv6.conf <<'EOF'
+net.ipv6.conf.all.accept_ra=2
+net.ipv6.conf.default.accept_ra=2
+EOF
+  # eMMC/SD 卡剩余空间自动分区并挂载到 /mnt/emmc（与 CI 共用同一份模板）
+  info "注入 eMMC 数据分区脚本 ..."
+  mkdir -p files/etc/uci-defaults
+  cp "$SCRIPT_DIR/neo4-emmc-data.uci-defaults.sh" \
+     files/etc/uci-defaults/99-neo4-emmc-data
+  chmod +x files/etc/uci-defaults/99-neo4-emmc-data
 }
 
 write_config() {
@@ -154,6 +184,8 @@ write_config() {
     echo "CONFIG_TARGET_rockchip=y"
     echo "CONFIG_TARGET_rockchip_armv8=y"
     echo "CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-neo4=y"
+    # root 分区 4GB：squashfs 之外的空间由 fstools 作为 overlay（软件包可用空间）
+    echo "CONFIG_TARGET_ROOTFS_PARTSIZE=4096"
     # 双保险：显式选中 NEO4 的 U-Boot 与 ATF 包，确保即使 defconfig 的 DEFAULT
     # 推导有意外，这两个启动加载器包也一定会被构建并安装其产物
     # （rk3399-idbloader.bin / rk3399-trust.bin / -uboot.img）。

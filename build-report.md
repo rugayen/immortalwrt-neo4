@@ -181,3 +181,62 @@ Windows 可用 balenaEtcher / Rufus 直接选择该 `.img.gz`。推荐 **squashf
 - **产物隔离**：新固件输出到 `firmware-dhcp/`，不覆盖上一版静态 IP 固件。
 - **使用注意**：刷完设备没有固定 IP，需在主路由 DHCP 租约表里按主机名 **NEO4** 查找
   （或用串口调试）。串口始终可用，也可随时用 uci 改回静态地址。
+
+## 功能变更：LuCI 界面默认简体中文（13:18 用户追加）
+
+- **查证**：ImmortalWrt 的 luci feed 中 po 目录为 `zh_Hans`/`zh_Hant`，但
+  `luci.mk` 里 `LUCI_LC_ALIAS.zh_Hans=zh-cn`，因此包名仍是 **`luci-i18n-base-zh-cn`**。
+  LuCI `modules/luci-base/ucode/dispatcher.uc` 读取 `luci.main.lang`，并把 `_` 替换成 `-`
+  后加载 `*.zh-cn.lmo`；默认配置为 `option lang 'auto'`。
+- **实现**：
+  - `.config` 增加 `CONFIG_PACKAGE_luci-i18n-base-zh-cn=y`（本地脚本 `EXTRA_PACKAGES` 同步）；
+  - uci-defaults 增加 `uci -q set luci.main.lang='zh_cn'`，随 `uci commit` 一并落盘。
+  - 值必须写 `zh_cn`（不是 `zh-cn`、`zh_Hans`）。
+- 上一版仅 DHCP 的 run `42566061713` 已取消，避免产出两个版本；中文与 DHCP 合并进同一次编译。
+- 闭环补强：新增 `make-eflasher-packages.py`，watchdog 成功后自动生成去尾部元数据的
+  eFlasher 专用包，并写入报告清单（此前该步骤需人工执行）。
+
+## 版本切换 + IPv6（13:28 用户追加）
+
+- **基础版本**：从 `master` 快照改为固定发布 tag **`v25.12.2`**
+  （`git clone --depth 1 --branch v25.12.2`；feeds.conf.default 里的 packages/luci/routing/
+  telephony/video 也锁定到该版本对应 commit，构建可复现）。
+- **兼容性核对**（直接拉取 `v25.12.2` 的上游源码逐项比对，结论：现有 NEO4 补丁全部不用改）：
+  - `target/linux/rockchip/image/armv8.mk`：`Device/rk3399` 默认 `BOOT_FLOW := pine64-bin`；
+  - `target/linux/rockchip/image/Makefile`：`pine64-bin` 的 dd 偏移仍是 64 / 16384 / 24576，
+    `UBOOT_DEVICE_NAME` 推导仍在第 77 行；
+  - `package/boot/uboot-rockchip/Makefile`：`UBOOT_TARGETS` 末项仍是 `rock-5c-rk3588s`
+    （sed 锚点有效），`$(eval $(call BuildPackage/U-Boot))` 在第 625 行，
+    `Build/InstallDev` 无 TPL 分支仍用 `loaderimage` 产 `$(BUILD_VARIANT)-uboot.img`，
+    `UBOOT_USE_BINMAN:=1` 仍在（pyelftools 依赖继续保留）；
+  - **唯一差异**：U-Boot 版本 `2025.10`（master 是 `2026.10`）；已确认 U-Boot v2025.10
+    的 `configs/nanopi-neo4-rk3399_defconfig` 存在；
+  - `atf-version.mk` 里 `RK3399_ATF/TPL/LOADER` blobs 齐全；
+  - 该版本 luci feed（固定 commit `d6167ea…`）仍是 `LUCI_LC_ALIAS.zh_Hans=zh-cn`，
+    故中文包名 `luci-i18n-base-zh-cn` 与 `zh_cn` 语言值继续有效。
+- **IPv6 自动获取**（OpenWrt 官方 Bridged AP 方案）：uci-defaults 创建 `lan6` 接口
+  `proto=dhcpv6`、`device=@lan`、`reqaddress=try`、`reqprefix=no`、`lan.delegate=0`；
+  并关闭本机 LAN 上的 `dhcpv6/ra/ndp` 服务（`disabled`），全部交给上级路由，避免冲突。
+  上游只发 RA 时也能靠 **SLAAC + RDNSS** 获得 IPv6 地址与 DNS。
+  另注入 `files/etc/sysctl.d/99-neo4-ipv6.conf` 设 `accept_ra=2`，保证开启 IPv6 转发时
+  SLAAC 仍生效；`.config` 显式选中 `CONFIG_PACKAGE_odhcp6c=y`。
+- 本轮把 DHCP + 中文 + 25.12.2 + IPv6 合并为**一次编译**，避免产出多个中间版本。
+
+## 磁盘空间：软件包 4GB + eMMC 剩余空间挂载（13:33 用户追加）
+
+- **软件包空间 4GB**：`.config` 增加 `CONFIG_TARGET_ROOTFS_PARTSIZE=4096`（单位 MB）。
+  该值决定 root 分区大小；squashfs 只读部分之外的空间由 fstools 作为 overlay，
+  即「可安装软件包 / 保存配置」的可用空间约 4GB（默认仅约 160MB）。
+  镜像 gzip 后仍然很小（零填充高压缩率），但刷写时会写入约 4.1GB。
+- **eMMC 剩余空间挂载**：新增 `neo4-emmc-data.uci-defaults.sh` 模板，CI 与本地脚本
+  共用同一份，注入为 `files/etc/uci-defaults/99-neo4-emmc-data`。首次启动时：
+  1. 从 `/proc/cmdline` 的 `root=PARTUUID=` 定位启动盘（SD 卡或 eMMC 都适用）；
+  2. 读 sysfs 算出 root 分区结束扇区，剩余空间 > 1GB 才继续；
+  3. `parted -s ... mkpart primary ext4 <start>s 100%` 创建第 3 分区；
+  4. **只对新创建的分区**执行 `mkfs.ext4 -F -L emmc-data`（绝不覆盖已有数据）；
+  5. 写 `/etc/config/fstab`（命名段 `emmc`）挂载到 **`/mnt/emmc`**，并立即挂载一次。
+  - 幂等 + 失败安全：工具缺失或步骤失败只写 `/tmp/neo4-emmc-data.log`，不影响启动；
+    返回 1 时 uci-defaults 会保留脚本，下次启动重试。
+- 依赖包已在 25.12.2 中核实存在：`parted`（锁定的 packages feed `utils/parted`）、
+  `e2fsprogs` 与 `block-mount`（主仓库）、`kmod-fs-ext4`。
+- 最终这一版合并：**v25.12.2 + LAN DHCP + LuCI 中文 + IPv6 + 4GB 软件包空间 + eMMC 剩余空间挂载**。
