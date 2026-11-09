@@ -57,9 +57,10 @@ define Device/friendlyarm_nanopi-neo4
   $(Device/rk3399)
   DEVICE_VENDOR := FriendlyARM
   DEVICE_MODEL := NanoPi NEO4
-  # RK3399 采用 Rockchip miniloader 三段式启动（pine64-bin）：idbloader/trust 来自
-  # rockchip-rkbin 预编译 blob，U-Boot 自身由 nanopi-neo4-rk3399_defconfig 编译为
-  # -uboot.img。这与官方 rk3399 设备（nanopi-r4s 等）完全一致。
+  # RK3399 采用 Rockchip miniloader 三段式启动（pine64-bin）：idbloader/trust 由
+  # arm-trusted-firmware-rockchip 包（PKG_NAME=rkbin，含预编译 DDR/miniloader blob）
+  # 生成，U-Boot 自身由 nanopi-neo4-rk3399_defconfig 编译为 -uboot.img。
+  # 这与官方 rk3399 设备（nanopi-r4s 等）完全一致。
   BOOT_FLOW := pine64-bin
   DEVICE_PACKAGES := kmod-brcmfmac brcmfmac-firmware-43430-sdio brcmfmac-nvram-43430-sdio
 endef
@@ -84,7 +85,7 @@ define U-Boot/nanopi-neo4-rk3399
   $(U-Boot/rk3399/Default)
   NAME:=NanoPi NEO4
   # RK3399 的 U-Boot/rk3399/Default 仅设 ATF（不含 TPL），配合 pine64-bin 流程：
-  # DDR 初始化由 rockchip-rkbin 的预编译 idbloader 提供，无需 binman 打包。
+  # DDR 初始化由 arm-trusted-firmware-rockchip 的预编译 idbloader 提供，无需 binman 打包。
   BUILD_DEVICES:= \
     friendlyarm_nanopi-neo4
 endef
@@ -99,6 +100,11 @@ write_config() {
     echo "CONFIG_TARGET_rockchip=y"
     echo "CONFIG_TARGET_rockchip_armv8=y"
     echo "CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-neo4=y"
+    # 双保险：显式选中 NEO4 的 U-Boot 与 ATF 包，确保即使 defconfig 的 DEFAULT
+    # 推导有意外，这两个启动加载器包也一定会被构建并安装其产物
+    # （rk3399-idbloader.bin / rk3399-trust.bin / -uboot.img）。
+    echo "CONFIG_PACKAGE_u-boot-nanopi-neo4-rk3399=y"
+    echo "CONFIG_PACKAGE_trusted-firmware-a-rk3399=y"
     for p in "${EXTRA_PACKAGES[@]}"; do
       echo "CONFIG_PACKAGE_${p}=y"
     done
@@ -113,7 +119,12 @@ build_native() {
   cd "$WORKDIR"
   info "更新并安装 feeds ..."
   ./scripts/feeds update -a
-  ./scripts/feeds install -a
+  # 关键：不要安装 video 源。master 当前快照里 video 源的
+  # feeds/video/frameworks/qt5/qt5base/Config.in 存在循环依赖，一旦被装进配置树，
+  # make defconfig 会报 "recursive dependency detected" 并中断，导致 U-Boot / ATF 等
+  # 依赖 DEFAULT 选中的包无法被选中，最终镜像打包阶段找不到
+  # rk3399-idbloader.bin / rk3399-trust.bin。路由器固件只需 base(内置)+packages+luci。
+  ./scripts/feeds install packages luci routing telephony
 
   apply_patches "$WORKDIR"
   write_config "$WORKDIR"

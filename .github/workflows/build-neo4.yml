@@ -40,7 +40,15 @@ jobs:
         working-directory: immwrt
         run: |
           ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          # 注意：不要安装 video 源。master 当前快照里 video 源的
+          # feeds/video/frameworks/qt5/qt5base/Config.in 存在循环依赖，
+          # 一旦被装进配置树，make defconfig 会在解析全部包配置时报
+          # "recursive dependency detected" 并中断，导致 U-Boot / ATF 等
+          # 依赖 DEFAULT 选中的包（u-boot-nanopi-neo4-rk3399、
+          # trusted-firmware-a-rk3399）无法被选中，最终镜像打包阶段
+          # 找不到 rk3399-idbloader.bin / rk3399-trust.bin。
+          # 路由器固件只需要 base(内置) + packages + luci(+routing/telephony)。
+          ./scripts/feeds install packages luci routing telephony
 
           cat >> target/linux/rockchip/image/armv8.mk <<'EOF'
 
@@ -49,7 +57,8 @@ jobs:
             DEVICE_VENDOR := FriendlyARM
             DEVICE_MODEL := NanoPi NEO4
             # RK3399 采用 Rockchip miniloader 三段式启动（pine64-bin）：idbloader/trust
-            # 来自 rockchip-rkbin 预编译 blob，U-Boot 由 nanopi-neo4-rk3399_defconfig
+            # 由 arm-trusted-firmware-rockchip 包（PKG_NAME=rkbin，含预编译
+            # DDR/miniloader blob）生成；U-Boot 由 nanopi-neo4-rk3399_defconfig
             # 编译为 -uboot.img。与官方 rk3399 设备（nanopi-r4s）完全一致。
             BOOT_FLOW := pine64-bin
             DEVICE_PACKAGES := kmod-brcmfmac brcmfmac-firmware-43430-sdio brcmfmac-nvram-43430-sdio
@@ -89,6 +98,11 @@ jobs:
           CONFIG_PACKAGE_brcmfmac-firmware-43430-sdio=y
           CONFIG_PACKAGE_brcmfmac-nvram-43430-sdio=y
           CONFIG_PACKAGE_wpad-openssl=y
+          # 双保险：显式选中 NEO4 的 U-Boot 与 ATF 包，确保即使 defconfig 的
+          # DEFAULT 推导有意外，这两个启动加载器相关包也一定会被构建并安装
+          # 其产物（rk3399-idbloader.bin / rk3399-trust.bin / -uboot.img）。
+          CONFIG_PACKAGE_u-boot-nanopi-neo4-rk3399=y
+          CONFIG_PACKAGE_trusted-firmware-a-rk3399=y
           EOF
           make defconfig
 
