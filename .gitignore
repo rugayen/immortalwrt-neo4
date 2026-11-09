@@ -12,3 +12,11 @@ dl/
 .DS_Store
 Thumbs.db
 *.swp
+
+# 本地监控脚本含 GitHub PAT，及临时抓取的上游源文件，一律禁止入库
+/neo4mon2.sh
+/neo4mon2.log
+/neo4_fail.log
+/_*.json
+/_up_*
+/.workbuddy/

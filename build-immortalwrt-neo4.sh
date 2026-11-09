@@ -141,6 +141,13 @@ write_config() {
 
 build_native() {
   info "[native] 工作目录: $WORKDIR"
+  # U-Boot 使用 binman，include/u-boot.mk 的 host prereq 会执行
+  #   $(STAGING_DIR_HOST)/bin/python3 -c 'import elftools'
+  # 缺失会在 make 一开始直接报 "u-boot: Please install the Python3 elftools module"
+  # 并退出（CI run#10 失败根因），根本进不了编译。
+  if ! python3 -c 'import elftools' 2>/dev/null; then
+    die "缺少 pyelftools：请先执行 sudo apt install python3-pyelftools（或 pip3 install pyelftools）"
+  fi
   [ -d "$WORKDIR/.git" ] || \
     git clone --depth 1 --branch "$IMMORTALWRT_BRANCH" "$IMMORTALWRT_REPO" "$WORKDIR"
 
