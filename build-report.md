@@ -1,0 +1,183 @@
+# ImmortalWrt NEO4 构建监控报告
+
+**目标**：为 NanoPi NEO4（RK3399 / 1GB RAM / 用户加装 32GB eMMC）编译最新 ImmortalWrt 卡刷固件
+`immortalwrt-rockchip-armv8-friendlyarm_nanopi-neo4-squashfs-sysupgrade.img.gz`。
+
+**仓库**：`rugayen/immortalwrt-neo4`（main） · **runner**：GitHub 托管 `ubuntu-22.04`（已瘦身、`-j2`）
+
+**自动闭环规则**（无需人工指令）：
+1. 每 30s 轮询 Actions run，记录当前步骤（`watchdog.log`）；
+2. 失败 → 下载失败 job 完整日志（`logs/run*_full.log`）+ 抽取关键报错行（`logs/run*_errors.txt`）→ 追加到本报告 → 自动诊断根因 → 修改代码 → 提交推送 → 新 run 自动触发 → 重启监控；
+3. 瞬时错误（网络 / TLS / OOM / 磁盘）自动 rerun，最多 2 次；真实编译错误走第 2 步的修复闭环；
+4. 成功 → 下载 artifact、解压到 `firmware/`、写入最终产物清单 → 报告闭环结束。
+
+---
+
+## 历次报错与解决方案
+
+### run #7 — `dd` 找不到 `nanopi-neo4-rk3399-u-boot-rockchip.bin`
+
+**报错日志**
+```text
+dd: failed to open '.../nanopi-neo4-rk3399-u-boot-rockchip.bin': No such file or directory
+```
+
+**根因（当时的表层判断）**：设备定义里把 `BOOT_FLOW` 设成 `pine64-img` 并加了 `TPL`，`pine64-img` 流程要求 binman 产出的 `-u-boot-rockchip.bin`；RK3399 走的是 miniloader 三段式，只有设置 TPL（binman）时才会生成该文件。
+
+**解决方案**：`BOOT_FLOW := pine64-bin`（沿用 `Device/rk3399` 默认值），移除 `TPL:=$(RK3399_TPL)`；`U-Boot/nanopi-neo4-rk3399` 去掉 TPL 行，只继承 `$(U-Boot/rk3399/Default)` 的 ATF。
+**修复提交**：`371e5f3` → 触发 run #8。
+**结果**：run #8 换了一个报错，说明这只是表层症状，未触及真正根因。
+
+### run #8 — `dd` 找不到 `rk3399-idbloader.bin`
+
+**报错日志**
+```text
+dd: failed to open '.../rk3399-idbloader.bin': No such file or directory
+```
+
+**根因（真正根因）**：`./scripts/feeds install -a` 把 `video` feed 拉进配置树，而当前 master 快照的 `feeds/video/frameworks/qt5/qt5base/Config.in:18` 存在 **循环依赖**，导致
+```text
+feeds/video/frameworks/qt5/qt5base/Config.in:18:error: recursive dependency detected!
+```
+`make defconfig` 直接中断。于是 `include/u-boot.mk` 里 `DEFAULT := y if TARGET_rockchip_armv8_DEVICE_<device>` 的选择逻辑从未生效，`u-boot-rockchip` / `trusted-firmware-a-rk3399` 都没被选中，rkbin 的 `rk3399-idbloader.bin`、`rk3399-trust.bin` 自然不会生成。日志里这两个包名出现次数均为 0。
+
+**解决方案**：
+- `./scripts/feeds install -a` → `./scripts/feeds install packages luci routing telephony`（排除 video feed）；
+- `.config` 里显式加 `CONFIG_PACKAGE_u-boot-nanopi-neo4-rk3399=y`、`CONFIG_PACKAGE_trusted-firmware-a-rk3399=y` 双保险。
+**修复提交**：`17deead` → 触发 run #9。
+**结果**：defconfig 干净跑完，idbloader/trust 成功生成，暴露出下一层问题。
+
+### run #9 — `dd` 找不到 `nanopi-neo4-rk3399-uboot.img`
+
+**报错日志**
+```text
+dd if=.../rk3399-idbloader.bin ... (235 KB, 成功写入)
+dd: failed to open '.../nanopi-neo4-rk3399-uboot.img': No such file or directory
+make[3]: *** [Makefile:...: ...] Error 1
+```
+
+**根因**：把 `define U-Boot/nanopi-neo4-rk3399` 用 `cat >>` **追加到 `package/boot/uboot-rockchip/Makefile` 文件末尾**，而文件末尾那行 `$(eval $(call BuildPackage/U-Boot))` 在 Makefile 解析时**就立即执行**。见 `include/u-boot.mk`：`BuildPackage/U-Boot` 在 DUMP 阶段遍历 `UBOOT_TARGETS` 并调用 `$(call U-Boot/<variant>)`。定义出现在 eval 之后 → 取到空定义 → 该 uboot 包被建为空壳 → `Build/InstallDev`（无 TPL 分支）不会用 `loaderimage` 产出 `$(BUILD_VARIANT)-uboot.img`。16 万行日志里完全没有该变体的编译记录。
+
+**解决方案**：
+- 把 U-Boot 变体定义**插入到 `$(eval …)` 之前**（CI 用 awk、本地脚本用 python3 实现）；`UBOOT_TARGETS` 的 sed 添加保留（它本就在 eval 之前）；
+- 设备定义显式声明 `UBOOT_DEVICE_NAME := nanopi-neo4-rk3399`，与变体名、`pine64-bin` 的 dd 文件名对齐。
+**修复提交**：`0413be1` → 触发 run #10。
+**结果**：run #10 日志中 `CONFIG_PACKAGE_u-boot-nanopi-neo4-rk3399=y` 与 `luci=y` 均保留，u-boot 的 binman prereq 首次被触发，证明本修复生效。
+
+### run #10 — host 依赖 `python3-pyelftools` 缺失（4 分钟即挂）
+
+**报错日志**
+```text
+Checking 'python3-pyelftools'... failed.
+u-boot: Please install the Python3 elftools module
+make[3]: *** [include/prereq.mk:9: prereq] Error 1
+Package prerequisite check failed.
+make: *** [include/toplevel.mk:270: world] Error 2
+```
+
+**根因**：`uboot-rockchip/Makefile` 定义 `UBOOT_USE_BINMAN:=1`，`include/u-boot.mk`（29–33 行）的 `TestHostCommand python3-pyelftools` 会执行 `$(STAGING_DIR_HOST)/bin/python3 -c 'import elftools'`。CI 的 apt 依赖清单漏了 `python3-pyelftools`，`make` 在 prereq 阶段就退出，根本没进入编译。同机制下 `python3-setuptools` 检查 ok，说明该 staging host python 读的是系统 dist-packages，apt 安装即可满足。
+
+**解决方案**：
+- workflow 依赖安装新增 `python3-pyelftools python3-pip`，加 pip 兜底 + `/usr/bin/python3` 与 PATH python3 双重自检；
+- `build-immortalwrt-neo4.sh` 增加 pyelftools 前置自检，`Dockerfile` 同步补齐依赖；
+- 修正监控脚本状态解析（旧版 `conclusion` 带前导空格导致 completed 判断恒假、失败不写分析），加 4h 超时；
+- `.gitignore` 屏蔽含 PAT 的监控脚本与临时抓取文件。
+**附带核实**：主线 U-Boot **v2026.10 含 `configs/nanopi-neo4-rk3399_defconfig`**，变体名可正常配置，不是下一个坑。
+**修复提交**：`bbaa483` → 触发 run #11。
+**结果**：run #11 第 4 步「安装编译依赖」success（自检为硬校验），正式进入编译。
+
+---
+
+## 当前进度 —— 已完成 ✅
+
+- **run #11**（`42555210554`，commit `bbaa483`）：`completed / success`，编译于 04:39 UTC 结束（总耗时约 1 小时 26 分），步骤 1–9 全部 success。
+- 自动闭环 watchdog 自动下载 artifact（id `13650227623`，31.2 MB）并解压到 `firmware/`，闭环结束。
+- **本轮没有新增报错**：run #7~#10 的四次报错全部修复后，固件一次编译通过。
+
+## ✅ 构建成功 —— 2026-11-09 04:40 UTC
+
+- **成功 run**：`42555210554`
+- **artifact id**：`13650227623`
+- **固件目录**：`firmware/`
+
+```text
+immortalwrt-rockchip-armv8-friendlyarm_nanopi-neo4-ext4-sysupgrade.img.gz                      17601458 bytes
+immortalwrt-rockchip-armv8-friendlyarm_nanopi-neo4-squashfs-sysupgrade.img.gz                  15491034 bytes
+immortalwrt-rockchip-armv8-friendlyarm_nanopi-neo4.manifest                                        5102 bytes
+```
+
+自动闭环结束：固件已输出到 `firmware/`，可直接刷入 SD 卡或 eMMC。
+
+### 固件完整性校验（本地）
+
+- gzip 流完整（zlib `eof=True`），解压后镜像 **224 MB**；尾部 282 字节为 OpenWrt 标准 JSON 元数据
+  （`metadata_version 1.1`），不是损坏——`gzip -t` 的 "trailing garbage ignored" 属正常现象。
+- 三段引导**全部写入镜像**（对应 `pine64-bin` 的 dd 偏移）：
+  - `idbloader` @ 32 KB：16/16 字节非零；
+  - `uboot.img` @ 8 MB：头部 `4c4f414445522020` = `"LOADER  "`（loaderimage 魔数）；
+  - `trust.bin` @ 12 MB：头部 `424c3358` = `"BL3X"`（Rockchip trust 魔数）。
+  - 这直接证明 run #9 的 `nanopi-neo4-rk3399-uboot.img` 缺失问题已被彻底修复。
+- **SHA256**（`...-squashfs-sysupgrade.img.gz`）：
+  `805abb90a6f42a7d9d3757cc442f0e5f6c50a54dac8d29ccc0c56a19a5d00e36`
+- `manifest` 含 `brcmfmac-nvram-43430-sdio` 等 NEO4 设备包，说明设备定义生效。
+
+### 刷机方法
+
+```bash
+# Linux / WSL（先确认 /dev/sdX 是 SD 卡或 eMMC，切勿写错盘）
+gzip -dc firmware/immortalwrt-rockchip-armv8-friendlyarm_nanopi-neo4-squashfs-sysupgrade.img.gz \
+  | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync
+```
+
+Windows 可用 balenaEtcher / Rufus 直接选择该 `.img.gz`。推荐 **squashfs** 版（支持 sysupgrade、有 failsafe）；
+`ext4` 版适合需要可写根文件系统扩容的场景。
+
+### 通过 FriendlyElec eFlasher 刷入 eMMC
+
+官方 wiki（`Template:BurnLinuxToEMMC-Rockchip`）明确支持第三方固件，示例文件名即
+`openwrt-rockchip-armv8_nanopi-ext4-sysupgrade.img.gz`，与本项目产物同类。规则：
+
+- TF 卡写入任意带 `eflasher` 字样的官方固件（网盘 `01_系统固件/02_SD卡刷机固件(SD-to-eMMC)`）；
+- 重新插拔后 PC 出现 `FriendlyARM` 盘符，把 `.raw` 或 `.gz` 结尾的镜像复制进去
+  （`.img` 需改名为 `.raw`）；
+- 编辑卡上 `eflasher.conf`，设 `autoStart=<你的文件名>`；上电即自动烧写，看 LED 进度；
+- 烧完**弹出 SD 卡**，板子自动重启并从 eMMC 启动。
+- 亦可用方法 2：FriendlyWrt SD 卡启动 → 系统 → eMMC 刷机助手 → 选择文件 → 上传并烧写（支持 .gz/.img/.tgz/.zip）。
+
+为兼容 eFlasher 的解压实现，已把 sysupgrade 包尾部 282 字节 JSON 元数据去掉，重新压成纯 gzip：
+`firmware/immortalwrt-neo4-squashfs-eflasher.img.gz` (14.78 MB, SHA256 `084a9f37...`)、
+`firmware/immortalwrt-neo4-ext4-eflasher.img.gz` (16.82 MB, SHA256 `c0b9edec...`)，解压均为 224 MB、尾部 0 字节。
+
+镜像为 MBR 两分区（boot 16MB @32MB、root 160MB @64MB），`boot.scr` 使用
+`root=PARTUUID=${uuid}` 与 U-Boot 动态 `${devtype} ${devnum}`，未硬编码 SD 设备号，
+因此整盘写入 eMMC 后仍可正常挂载根文件系统。
+
+注意：刷写会清空 eMMC 全部数据；镜像仅 224 MB，32GB eMMC 剩余空间需启动后另行扩容；
+若刷后 SD 卡不再能启动 eFlasher（eMMC 上的 U-Boot 抢先引导），按住 Mask 键上电进入 Maskrom，
+用 RKDevTool 执行 EraseAll 擦除 eMMC 即可恢复。
+
+---
+
+## 功能变更：LAN 默认改为 DHCP 客户端（13:07 用户确认）
+
+- **需求**：NEO4 只有一个网口，OpenWrt 默认 `LAN = 静态 192.168.1.1 + 自带 DHCP 服务器`；
+  改为作为 **DHCP 客户端**从上级路由器自动获取 IP。
+- **用户选择**：① 重新编译内置 DHCP 的新固件（而非只给刷机后命令）；② **关闭**自身 DHCP 服务器。
+- **实现**：CI 与本地脚本在编译前注入 `files/etc/uci-defaults/99-neo4-lan-dhcp`
+  （OpenWrt 把源码根 `files/` 原样打进 rootfs）。脚本在首次启动、config_generate 生成
+  `/etc/config/network`、`/etc/config/dhcp` 之后执行：
+  ```sh
+  uci -q set network.lan.proto='dhcp'
+  uci -q delete network.lan.ipaddr
+  uci -q delete network.lan.netmask
+  uci -q set dhcp.lan.ignore='1'
+  uci -q set system.@system[0].hostname='NEO4'
+  uci commit
+  exit 0     # 成功后 uci-defaults 自动删除脚本，只生效一次
+  ```
+  另加守卫：`network.lan` 尚未生成时 `exit 1` 保留脚本、下次启动重试，避免写出残缺配置。
+- **本地验证**：模拟 GitHub Actions 的 `run: |` 缩进剥离后，生成的脚本 `#!/bin/sh` 在首行、
+  `bash -n` 通过、权限可执行。
+- **产物隔离**：新固件输出到 `firmware-dhcp/`，不覆盖上一版静态 IP 固件。
+- **使用注意**：刷完设备没有固定 IP，需在主路由 DHCP 租约表里按主机名 **NEO4** 查找
+  （或用串口调试）。串口始终可用，也可随时用 uci 改回静态地址。

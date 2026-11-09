@@ -17,6 +17,10 @@ Thumbs.db
 /neo4mon2.sh
 /neo4mon2.log
 /neo4_fail.log
+/neo4-watchdog.sh
+/watchdog.log
+/logs/
+/firmware/
 /_*.json
 /_up_*
 /.workbuddy/

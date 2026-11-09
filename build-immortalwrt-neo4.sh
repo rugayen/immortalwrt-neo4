@@ -119,6 +119,32 @@ else:
     print("uboot-rockchip already patched")
 PY
   fi
+
+  # 首次启动配置：LAN 改为 DHCP 客户端，并关闭自身 LAN DHCP 服务器。
+  # OpenWrt 会把源码根目录 files/ 原样打进 rootfs；/etc/uci-defaults/*.sh 在
+  # config_generate 生成 /etc/config/network、/etc/config/dhcp 之后执行，
+  # exit 0 后脚本自动删除（只生效一次，用户之后可自行改回）。
+  info "注入首次启动配置：LAN = DHCP 客户端 ..."
+  mkdir -p files/etc/uci-defaults
+  cat > files/etc/uci-defaults/99-neo4-lan-dhcp <<'EOF'
+#!/bin/sh
+# NEO4 只有一个网口：默认 LAN 静态 192.168.1.1 + 自带 DHCP 服务器。
+# 改为 DHCP 客户端从上级路由器取地址，并关闭自身 LAN DHCP 服务器避免冲突。
+# 守卫：config_generate 尚未生成 network.lan 时不写配置，返回 1 让
+# uci-defaults 保留本脚本，下次启动再试，避免写出残缺的 network 配置。
+if ! uci -q get network.lan >/dev/null 2>&1; then
+    exit 1
+fi
+uci -q set network.lan.proto='dhcp'
+uci -q delete network.lan.ipaddr
+uci -q delete network.lan.netmask
+uci -q set dhcp.lan.ignore='1'
+# 主机名固定为 NEO4，便于在主路由的 DHCP 租约表里找到它。
+uci -q set system.@system[0].hostname='NEO4'
+uci commit
+exit 0
+EOF
+  chmod +x files/etc/uci-defaults/99-neo4-lan-dhcp
 }
 
 write_config() {
